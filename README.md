@@ -151,7 +151,7 @@ git commit -m "Updated solution"
 git push origin main
 ```
 
-This will trigger an **automated test** on your GitHub repository using a **benchmark machine (2 vCPU + 8GB RAM) with LEVEL=10**.  
+This will trigger an **automated test** on your GitHub repository using a **benchmark machine (2 vCPU + 8GB RAM) with LEVEL=5**.  
 
 Check the results on:  
 - Your **GitHub repository page**  
@@ -167,21 +167,22 @@ Once satisfied, go to:
 
 Find your commit and click **Upgrade**.  
 
-- This runs your code on a **higher-spec machine (4 vCPU + 16GB RAM) with LEVEL=25**.  
+- This runs your code on a **higher-spec machine (4 vCPU + 16GB RAM) with LEVEL=15**.  
 - **Only upgraded submissions count towards the leaderboard.**  
 - **You can request only ONE commit upgrade per hour.**  
+- **You cannot request an upgrade within the first hour of creating your account.**  
 - If you upgrade multiple commits, **the one with the fastest runtime will be considered for the leaderboard**.  
 
 ## **10. Execution Time Limits & Rules**  
 
 - **Maximum execution time:** **40 seconds**  
 - If your code takes **more than 40 seconds**, it will be **terminated** and marked as **failed**.  
-- **Push tests:** Run with `LEVEL=10` (for your reference).  
-- **Upgrade tests:** Run with `LEVEL=25` (used for the leaderboard).  
+- **Push tests:** Run with `LEVEL=5` (for your reference).  
+- **Upgrade tests:** Run with `LEVEL=15` (used for the leaderboard).  
 
 ## **11. Winning Criteria**  
 
-- The **fastest valid execution** on `LEVEL=25` determines the winner.  
+- The **fastest valid execution** on `LEVEL=15` determines the winner.  
 - **Only Python standard libraries are allowed.**  
 - **No precompiled binaries, no external dependencies, no API calls unless explicitly allowed.**  
 
