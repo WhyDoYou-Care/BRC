@@ -4,7 +4,9 @@ from collections import defaultdict
 import multiprocessing as mp 
 from operator import add
 from os import SEEK_END
+import os
 from time import time
+import mmap  
 
 class SerialPool:
     def imap(self, func, it, chunksize="ignored"):
@@ -49,70 +51,67 @@ def file_size(f) -> int:
     return ret
 
 def seek_next_line(f) -> int:
-    f.readline()  # advance to the end of current line
+    f.readline()
     return f.tell()
 
 def gen_chunks(filename: str, chunks: int):
-    """Yield [lo, hi) positions for each chunk. Both lo and hi will point to the beginning of a line (or EOF)."""
-    f = open(filename, 'rb')
-    sz = file_size(f)
-    chunk_sz = sz // chunks
-    print(f"file size: {sz}, chunks {chunks}")
-    x = 0
-    f.seek(x)
-    while x < sz:
-        y = x + chunk_sz
-        if y >= sz:
-            yield (x, sz)
-            return
-        f.seek(y)
-        y = seek_next_line(f)
-        yield (x, y)
-        x = y
+    with open(filename, 'rb') as f:
+        sz = file_size(f)
+        chunk_sz = sz // chunks
+        x = 0
+        f.seek(x)
+        while x < sz:
+            y = x + chunk_sz
+            if y >= sz:
+                yield (x, sz)
+                return
+            f.seek(y)
+            y = seek_next_line(f)
+            yield (x, y)
+            x = y
 
 def dochunk(tup) -> State:
     filename, lo, hi = tup 
-    f = open(filename)
-    f.seek(lo)
     st = State()
-    # Process each line until reaching the end of this chunk
-    while f.tell() < hi:
-        line = f.readline()
-        if not line or not line.strip():
+    with open(filename, 'r+b') as f:
+        granularity = mmap.ALLOCATIONGRANULARITY
+        aligned_lo = lo - (lo % granularity)
+        offset_in_map = lo - aligned_lo
+        map_length = (hi - lo) + offset_in_map
+        mm = mmap.mmap(f.fileno(), length=map_length, offset=aligned_lo, access=mmap.ACCESS_READ)
+        data = mm[offset_in_map:offset_in_map + (hi - lo)].decode('utf-8')
+        mm.close()
+
+    for line in data.splitlines():
+        if not line.strip():
             continue
-        name, tempstr = line.strip().split(';')
-        temp = float(tempstr)
-        st.proc(name, temp)
-    print(f"Chunk processed from {lo} to {hi} (file pointer at {f.tell()})")
+        try:
+            name, tempstr = line.split(';')
+            st.proc(name, float(tempstr))
+        except ValueError:
+            continue
     st.freeze()
     return st
 
+
 def round_to_infinity(x: float) -> float:
-    """
-    Rounds the given number to one decimal place according to the IEEE 754
-    "round toward +∞" (i.e. round to infinity) rule.
-    """
     return math.ceil(x * 10) / 10
 
 def main(filename, chunk_count):
-    print(f"Reading from {filename}. chunks: {chunk_count}")
     start = time()
     pool = mp.Pool()
     acc = State()
     tups = ((filename, lo, hi) for lo, hi in gen_chunks(filename, chunk_count))
-    for i, st in enumerate(pool.imap(dochunk, tups)):
-        print(f"Processed chunk {i+1}/{chunk_count} in {time() - start:.2f} seconds")
+    for i, st in enumerate(pool.imap_unordered(dochunk, tups)):
         acc.merge(st)
     
     with open("output.txt", "w") as f_out:
-        names = sorted(acc.cnts.keys())
-        for name in names:
+        for name in sorted(acc.cnts.keys()):
             avg = acc.tots[name] / acc.cnts[name]
             rounded_min = round_to_infinity(acc.mins[name])
             rounded_avg = round_to_infinity(avg)
             rounded_max = round_to_infinity(acc.maxs[name])
             f_out.write(f"{name}={rounded_min:.1f}/{rounded_avg:.1f}/{rounded_max:.1f}\n")
-    print("Output written to output.txt")
     
 if __name__ == "__main__":
     filename = "testcase.txt"    
