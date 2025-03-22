@@ -1,104 +1,105 @@
+import mmap
 import multiprocessing
 import os
-import mmap
 import math
-from typing import List, Dict, Tuple
-from dataclasses import dataclass
 
-@dataclass
-class City:
-    min: float
-    max: float
-    sum: float
-    count: int
+# Determine CPU count and page size (using sysconf if available)
+CPU_COUNT = os.cpu_count()
+try:
+    MMAP_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+except AttributeError:
+    MMAP_PAGE_SIZE = mmap.ALLOCATIONGRANULARITY
 
-file_path = "testcase.txt"
+def to_int(x: bytes) -> int:
+    # Convert a temperature string (e.g., b"76.2", b"-9.9") to an integer representation (temp*10)
+    n = len(x)
+    if n == 5:  # e.g., b"-99.9"
+        return -100 * x[1] - 10 * x[2] - x[4] + 5328
+    elif n == 4 and x[0] == 45:  # e.g., b"-9.9" (45 is ASCII for '-')
+        return -10 * x[1] - x[3] + 528
+    elif n == 4:  # e.g., b"99.9"
+        return 100 * x[0] + 10 * x[1] + x[3] - 5328
+    else:  # n == 3, e.g., b"9.9"
+        return 10 * x[0] + x[2] - 528
 
-def is_new_line(position: int, mm: mmap.mmap) -> bool:
-    if position == 0:
-        return True
+def process_line(line: bytes, result: dict) -> None:
+    idx = line.find(b";")
+    if idx == -1:
+        return
+    city = line[:idx]
+    # Convert the temperature string to an int (temperature * 10)
+    temp_int = to_int(line[idx + 1 : -1])
+    if city in result:
+        item = result[city]
+        item[0] += 1      # count
+        item[1] += temp_int   # sum
+        item[2] = min(item[2], temp_int)
+        item[3] = max(item[3], temp_int)
     else:
-        mm.seek(position - 1)
-        return mm.read(1) == b"\n"
+        result[city] = [1, temp_int, temp_int, temp_int]
 
-def next_line(position: int, mm: mmap.mmap) -> int:
-    mm.seek(position)
-    mm.readline()
-    return mm.tell()
+def align_offset(offset: int, page_size: int) -> int:
+    return (offset // page_size) * page_size
 
-def process_chunk(chunk_start: int, chunk_end: int) -> Dict[bytes, City]:
-    chunk_size = chunk_end - chunk_start
-    with open(file_path, "r+b") as file:
-        mm = mmap.mmap(file.fileno(), length=chunk_size, access=mmap.ACCESS_READ, offset=chunk_start)
-        if chunk_start != 0:
-            next_line(0, mm)
-        result: Dict[bytes, City] = {}
-        for line in iter(mm.readline, b""):
-            location, temp_str = line.split(b";")
-            measurement = float(temp_str)
-            if location not in result:
-                result[location] = City(measurement, measurement, measurement, 1)
+def process_chunk(file_path: str, start_byte: int, end_byte: int) -> dict:
+    # Align the start offset to the system page size
+    offset = align_offset(start_byte, MMAP_PAGE_SIZE)
+    result = {}
+    with open(file_path, "rb") as file:
+        length = end_byte - offset
+        with mmap.mmap(file.fileno(), length, access=mmap.ACCESS_READ, offset=offset) as mmapped_file:
+            mmapped_file.seek(start_byte - offset)
+            for line in iter(mmapped_file.readline, b""):
+                process_line(line, result)
+    return result
+
+def reduce(results: list) -> dict:
+    final = {}
+    for result in results:
+        for city, item in result.items():
+            if city in final:
+                final[city][0] += item[0]
+                final[city][1] += item[1]
+                final[city][2] = min(final[city][2], item[2])
+                final[city][3] = max(final[city][3], item[3])
             else:
-                _result = result[location]
-                if measurement < _result.min:
-                    _result.min = measurement
-                if measurement > _result.max:
-                    _result.max = measurement
-                _result.sum += measurement
-                _result.count += 1
-        mm.close()
-        return result
-
-def identify_chunks(num_processes: int) -> List[Tuple[int, int]]:
-    chunk_results = []
-    with open(file_path, "r+b") as file:
-        mm = mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ)
-        file_size = os.path.getsize(file_path)
-        chunk_size = file_size // num_processes
-        chunk_size += mmap.ALLOCATIONGRANULARITY - (chunk_size % mmap.ALLOCATIONGRANULARITY)
-        start = 0
-        while start < file_size:
-            end = start + chunk_size
-            if end < file_size:
-                end = next_line(end, mm)
-            if start == end:
-                end = next_line(end, mm)
-            if end > file_size:
-                end = file_size
-                chunk_results.append((start, end))
-                break
-            chunk_results.append((start, end))
-            start += chunk_size
-        mm.close()
-        return chunk_results
+                final[city] = item
+    return final
 
 def round_to_infinity(x: float) -> float:
+    # Round upward (ceiling) to one decimal place per IEEE 754 "round to infinity"
     return math.ceil(x * 10) / 10
 
-def main() -> None:
-    num_processes = os.cpu_count() or 1
-    chunk_results = identify_chunks(num_processes)
-    with multiprocessing.Pool(num_processes) as pool:
-        ret_dicts = pool.starmap(process_chunk, chunk_results)
-    shared_results: Dict[bytes, City] = {}
-    for return_dict in ret_dicts:
-        for station, data in return_dict.items():
-            if station in shared_results:
-                _result = shared_results[station]
-                if data.min < _result.min:
-                    _result.min = data.min
-                if data.max > _result.max:
-                    _result.max = data.max
-                _result.sum += data.sum
-                _result.count += data.count
-            else:
-                shared_results[station] = data
+def read_file_in_chunks(file_path: str) -> None:
+    file_size_bytes = os.path.getsize(file_path)
+    base_chunk_size = file_size_bytes // CPU_COUNT
+    chunks = []
+
+    with open(file_path, "r+b") as file:
+        with mmap.mmap(file.fileno(), length=0, access=mmap.ACCESS_READ) as mmapped_file:
+            start_byte = 0
+            for _ in range(CPU_COUNT):
+                end_byte = min(start_byte + base_chunk_size, file_size_bytes)
+                newline_index = mmapped_file.find(b"\n", end_byte)
+                if newline_index == -1:
+                    end_byte = file_size_bytes
+                else:
+                    end_byte = newline_index + 1
+                chunks.append((file_path, start_byte, end_byte))
+                start_byte = end_byte
+
+    with multiprocessing.Pool(processes=CPU_COUNT) as pool:
+        results = pool.starmap(process_chunk, chunks)
+
+    final = reduce(results)
+    # Write the output sorted alphabetically by city (decoded as UTF-8)
     with open("output.txt", "w", encoding="utf8") as out_file:
-        for location, measurements in sorted(shared_results.items(), key=lambda kv: kv[0].decode("utf8")):
-            min_val = round_to_infinity(measurements.min)
-            mean_val = round_to_infinity(measurements.sum / measurements.count)
-            max_val = round_to_infinity(measurements.max)
-            out_file.write(f"{location.decode('utf8')}={min_val:.1f}/{mean_val:.1f}/{max_val:.1f}\n")
+        for city, vals in sorted(final.items(), key=lambda x: x[0].decode("utf8")):
+            count, total, min_val, max_val = vals
+            # Compute mean using integer arithmetic; division converts to float here only for output
+            mean_val = total / count
+            # Convert back to the original temperature by dividing by 10 and applying rounding
+            out_file.write(f"{city.decode('utf8')}={round_to_infinity(min_val/10):.1f}/{round_to_infinity(mean_val/10):.1f}/{round_to_infinity(max_val/10):.1f}\n")
 
 if __name__ == "__main__":
-    main()
+    read_file_in_chunks("testcase.txt")
