@@ -1,123 +1,104 @@
-import sys
-import math
-from collections import defaultdict
-import multiprocessing as mp 
-from operator import add
-from os import SEEK_END
+import multiprocessing
 import os
-from time import time
-import mmap  
+import mmap
+import math
+from typing import List, Dict, Tuple
+from dataclasses import dataclass
 
-class SerialPool:
-    def imap(self, func, it, chunksize="ignored"):
-        for x in it:
-            yield func(x)
+@dataclass
+class City:
+    min: float
+    max: float
+    sum: float
+    count: int
 
-def merge_dict(acc: dict, new: dict, fn:"callable"):
-    for k, v in new.items():
-        if k in acc:
-            acc[k] = fn(acc[k], v)
-        else:
-            acc[k] = v
+file_path = "testcase.txt"
 
-class State:
-    def __init__(self):
-        self.mins = defaultdict(lambda: float('inf'))
-        self.maxs = defaultdict(lambda: float('-inf'))
-        self.tots = defaultdict(lambda: 0.0)
-        self.cnts = defaultdict(lambda: 0)
+def is_new_line(position: int, mm: mmap.mmap) -> bool:
+    if position == 0:
+        return True
+    else:
+        mm.seek(position - 1)
+        return mm.read(1) == b"\n"
 
-    def proc(self, name, temp):
-        self.cnts[name] += 1
-        self.tots[name] += temp
-        self.mins[name] = min(self.mins[name], temp)
-        self.maxs[name] = max(self.maxs[name], temp)
+def next_line(position: int, mm: mmap.mmap) -> int:
+    mm.seek(position)
+    mm.readline()
+    return mm.tell()
 
-    def freeze(self):
-        for d in [self.mins, self.maxs, self.tots, self.cnts]:
-            if isinstance(d, defaultdict):
-                d.default_factory = None
-
-    def merge(self, st):
-        merge_dict(self.cnts, st.cnts, add)
-        merge_dict(self.tots, st.tots, add)
-        merge_dict(self.mins, st.mins, min)
-        merge_dict(self.maxs, st.maxs, max)
-
-def file_size(f) -> int:
-    x = f.tell()
-    ret = f.seek(0, SEEK_END)
-    f.seek(x)
-    return ret
-
-def seek_next_line(f) -> int:
-    f.readline()
-    return f.tell()
-
-def gen_chunks(filename: str, chunks: int):
-    with open(filename, 'rb') as f:
-        sz = file_size(f)
-        chunk_sz = sz // chunks
-        x = 0
-        f.seek(x)
-        while x < sz:
-            y = x + chunk_sz
-            if y >= sz:
-                yield (x, sz)
-                return
-            f.seek(y)
-            y = seek_next_line(f)
-            yield (x, y)
-            x = y
-
-def dochunk(tup) -> State:
-    filename, lo, hi = tup 
-    st = State()
-    with open(filename, 'r+b') as f:
-        granularity = mmap.ALLOCATIONGRANULARITY
-        aligned_lo = lo - (lo % granularity)
-        offset_in_map = lo - aligned_lo
-        map_length = (hi - lo) + offset_in_map
-        mm = mmap.mmap(f.fileno(), length=map_length, offset=aligned_lo, access=mmap.ACCESS_READ)
-        data = mm[offset_in_map:offset_in_map + (hi - lo)].decode('utf-8')
+def process_chunk(chunk_start: int, chunk_end: int) -> Dict[bytes, City]:
+    chunk_size = chunk_end - chunk_start
+    with open(file_path, "r+b") as file:
+        mm = mmap.mmap(file.fileno(), length=chunk_size, access=mmap.ACCESS_READ, offset=chunk_start)
+        if chunk_start != 0:
+            next_line(0, mm)
+        result: Dict[bytes, City] = {}
+        for line in iter(mm.readline, b""):
+            location, temp_str = line.split(b";")
+            measurement = float(temp_str)
+            if location not in result:
+                result[location] = City(measurement, measurement, measurement, 1)
+            else:
+                _result = result[location]
+                if measurement < _result.min:
+                    _result.min = measurement
+                if measurement > _result.max:
+                    _result.max = measurement
+                _result.sum += measurement
+                _result.count += 1
         mm.close()
+        return result
 
-    for line in data.splitlines():
-        if not line.strip():
-            continue
-        try:
-            name, tempstr = line.split(';')
-            st.proc(name, float(tempstr))
-        except ValueError:
-            continue
-    st.freeze()
-    return st
-
+def identify_chunks(num_processes: int) -> List[Tuple[int, int]]:
+    chunk_results = []
+    with open(file_path, "r+b") as file:
+        mm = mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ)
+        file_size = os.path.getsize(file_path)
+        chunk_size = file_size // num_processes
+        chunk_size += mmap.ALLOCATIONGRANULARITY - (chunk_size % mmap.ALLOCATIONGRANULARITY)
+        start = 0
+        while start < file_size:
+            end = start + chunk_size
+            if end < file_size:
+                end = next_line(end, mm)
+            if start == end:
+                end = next_line(end, mm)
+            if end > file_size:
+                end = file_size
+                chunk_results.append((start, end))
+                break
+            chunk_results.append((start, end))
+            start += chunk_size
+        mm.close()
+        return chunk_results
 
 def round_to_infinity(x: float) -> float:
     return math.ceil(x * 10) / 10
 
-def main(filename, chunk_count):
-    start = time()
-    pool = mp.Pool()
-    acc = State()
-    tups = ((filename, lo, hi) for lo, hi in gen_chunks(filename, chunk_count))
-    for i, st in enumerate(pool.imap_unordered(dochunk, tups)):
-        acc.merge(st)
-    
-    with open("output.txt", "w") as f_out:
-        for name in sorted(acc.cnts.keys()):
-            avg = acc.tots[name] / acc.cnts[name]
-            rounded_min = round_to_infinity(acc.mins[name])
-            rounded_avg = round_to_infinity(avg)
-            rounded_max = round_to_infinity(acc.maxs[name])
-            f_out.write(f"{name}={rounded_min:.1f}/{rounded_avg:.1f}/{rounded_max:.1f}\n")
-    
+def main() -> None:
+    num_processes = os.cpu_count() or 1
+    chunk_results = identify_chunks(num_processes)
+    with multiprocessing.Pool(num_processes) as pool:
+        ret_dicts = pool.starmap(process_chunk, chunk_results)
+    shared_results: Dict[bytes, City] = {}
+    for return_dict in ret_dicts:
+        for station, data in return_dict.items():
+            if station in shared_results:
+                _result = shared_results[station]
+                if data.min < _result.min:
+                    _result.min = data.min
+                if data.max > _result.max:
+                    _result.max = data.max
+                _result.sum += data.sum
+                _result.count += data.count
+            else:
+                shared_results[station] = data
+    with open("output.txt", "w", encoding="utf8") as out_file:
+        for location, measurements in sorted(shared_results.items(), key=lambda kv: kv[0].decode("utf8")):
+            min_val = round_to_infinity(measurements.min)
+            mean_val = round_to_infinity(measurements.sum / measurements.count)
+            max_val = round_to_infinity(measurements.max)
+            out_file.write(f"{location.decode('utf8')}={min_val:.1f}/{mean_val:.1f}/{max_val:.1f}\n")
+
 if __name__ == "__main__":
-    filename = "testcase.txt"    
-    chunk_count = mp.cpu_count() 
-    if len(sys.argv) > 1:
-        filename = sys.argv[1]
-    if len(sys.argv) > 2:
-        chunk_count = int(sys.argv[2])
-    main(filename, chunk_count)
+    main()
